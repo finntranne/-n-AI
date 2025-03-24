@@ -3,6 +3,7 @@ import sys
 import random
 import heapq
 import pytmx
+import xml.etree.ElementTree as ET
 
 # Khởi tạo Pygame
 pygame.init()
@@ -45,7 +46,7 @@ YELLOW = (255, 255, 0)  # Màu viền cho các đối tượng nội thất
 # Font để hiển thị debug
 font = pygame.font.SysFont(None, 30)
 
-# Tạo lưới từ lớp "Wall" và "FurnitureObjects"
+# Tạo lưới từ lớp "Wall" (chỉ đánh dấu tường)
 map_grid = [[0 for _ in range(COLS)] for _ in range(ROWS)]
 
 # Đánh dấu các ô tường từ layer "Wall"
@@ -55,20 +56,24 @@ for x in range(COLS):
         if wall_layer.data[y][x] != 0:  # Nếu có tile trong lớp Wall
             map_grid[y][x] = 1
 
-# Đánh dấu các ô bị chiếm bởi đồ nội thất từ layer "FurnitureObjects"
+# Lưu danh sách hình chữ nhật bao quanh của đồ nội thất
+furniture_rects = []
+
+# Tạo danh sách hình chữ nhật bao quanh của đồ nội thất từ layer "FurnitureObjects"
 furniture_layer = tmx_data.get_layer_by_name("FurnitureObjects")
 for obj in furniture_layer:
     if hasattr(obj, 'x') and hasattr(obj, 'y') and hasattr(obj, 'width') and hasattr(obj, 'height'):
-        # Tính toán các ô mà đồ nội thất chiếm
-        start_x = int(obj.x // GRID_SIZE)
-        start_y = int(obj.y // GRID_SIZE)
-        width_in_grids = int(obj.width // GRID_SIZE)
-        height_in_grids = int(obj.height // GRID_SIZE)
-
-        # Đánh dấu các ô trong map_grid là không thể đi qua
-        for i in range(start_y, min(start_y + height_in_grids, ROWS)):
-            for j in range(start_x, min(start_x + width_in_grids, COLS)):
-                map_grid[i][j] = 1  # Đánh dấu là chướng ngại vật
+        # Tính hình chữ nhật bao quanh của đồ nội thất (sau khi phóng to)
+        scaled_width = obj.width * scale_factor
+        scaled_height = obj.height * scale_factor
+        tile_width_in_grids = obj.width / GRID_SIZE
+        tile_height_in_grids = obj.height / GRID_SIZE
+        offset_x = (SCALED_GRID_SIZE * tile_width_in_grids - scaled_width) / 2
+        offset_y = (SCALED_GRID_SIZE * tile_height_in_grids - scaled_height) / 2
+        draw_x = obj.x * scale_factor + OFFSET_X + offset_x
+        draw_y = obj.y * scale_factor + OFFSET_Y + offset_y
+        furniture_rect = pygame.Rect(draw_x, draw_y, scaled_width, scaled_height)
+        furniture_rects.append(furniture_rect)
 
 # Load vị trí từ lớp "Objects"
 thief_pos = None
@@ -87,13 +92,64 @@ for obj in tmx_data.objects:
     elif obj.name == "exit":
         exit_pos = [int(obj.y // GRID_SIZE), int(obj.x // GRID_SIZE)]
 
-# Gán giá trị mặc định nếu không tìm thấy
+# Hàm tính hitbox của nhân vật
+def get_character_hitbox(pos, size):
+    draw_x = pos[1] * SCALED_GRID_SIZE + OFFSET_X
+    draw_y = pos[0] * SCALED_GRID_SIZE + OFFSET_Y
+    return pygame.Rect(draw_x, draw_y, size, size)
+
+# Hàm kiểm tra va chạm với đồ nội thất
+def check_furniture_collision(pos, size, furniture_rects):
+    character_rect = get_character_hitbox(pos, size)
+    # Kiểm tra va chạm với từng đồ nội thất
+    for furniture_rect in furniture_rects:
+        if character_rect.colliderect(furniture_rect):
+            return True
+    return False
+
+# Hàm tìm vị trí gần nhất không va chạm
+def find_nearest_free_position(start_pos, size, furniture_rects, grid):
+    if not check_furniture_collision(start_pos, size, furniture_rects):
+        return start_pos  # Vị trí hiện tại không va chạm
+    
+    # Sử dụng BFS để tìm vị trí gần nhất không va chạm
+    queue = [(start_pos[0], start_pos[1])]
+    visited = {(start_pos[0], start_pos[1])}
+    directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]
+    
+    while queue:
+        row, col = queue.pop(0)
+        for dr, dc in directions:
+            new_row, new_col = row + dr, col + dc
+            new_pos = [new_row, new_col]
+            if (0 <= new_row < ROWS and 0 <= new_col < COLS and 
+                (new_row, new_col) not in visited and 
+                grid[new_row][new_col] != 1 and 
+                not check_furniture_collision(new_pos, size, furniture_rects)):
+                return new_pos
+            if 0 <= new_row < ROWS and 0 <= new_col < COLS and (new_row, new_col) not in visited:
+                visited.add((new_row, new_col))
+                queue.append((new_row, new_col))
+    
+    # Nếu không tìm thấy vị trí nào, trả về vị trí mặc định
+    print("Warning: Could not find a free position!")
+    return [1, 1]
+
+# Gán giá trị mặc định nếu không tìm thấy và kiểm tra va chạm
 if thief_pos is None:
     print("Warning: Thief position not found in the map! Using default position.")
     thief_pos = [1, 1]  # Vị trí mặc định
+else:
+    # Kiểm tra và điều chỉnh vị trí khởi tạo của thief
+    thief_pos = find_nearest_free_position(thief_pos, SCALED_GRID_SIZE, furniture_rects, map_grid)
+
 if master_pos is None:
     print("Warning: Master position not found in the map! Using default position.")
     master_pos = [5, 5]
+else:
+    # Kiểm tra và điều chỉnh vị trí khởi tạo của master
+    master_pos = find_nearest_free_position(master_pos, SCALED_GRID_SIZE, furniture_rects, map_grid)
+
 if exit_pos is None:
     print("Warning: Exit position not found in the map! Using default position.")
     exit_pos = [10, 10]
@@ -116,8 +172,9 @@ SPRITE_COLS = 4  # Số cột trong sprite sheet
 sprite_width = thief_sprite_sheet.get_width() // SPRITE_COLS  # Chiều rộng của mỗi sprite
 sprite_height = thief_sprite_sheet.get_height() // SPRITE_ROWS  # Chiều cao của mỗi sprite
 
-THIEF_SCALE_FACTOR = 1.2  # Hệ số phóng to cho nhân vật thief
+THIEF_SCALE_FACTOR = 1.0  # Hệ số phóng to cho nhân vật thief
 THIEF_SIZE = int(SCALED_GRID_SIZE * THIEF_SCALE_FACTOR)
+MASTER_SIZE = THIEF_SIZE  # Đặt kích thước hitbox của master bằng với thief
 
 # Từ điển lưu các hình ảnh theo hướng
 thief_sprites = {
@@ -146,7 +203,7 @@ for row in range(SPRITE_ROWS):
             thief_sprites["right"].append(sprite_image)
 
 # Sprite đơn giản (phóng to theo scale_factor) cho các đối tượng khác
-master_img = pygame.Surface((SCALED_GRID_SIZE, SCALED_GRID_SIZE))
+master_img = pygame.Surface((MASTER_SIZE, MASTER_SIZE))  # Sử dụng MASTER_SIZE cho hình ảnh của master
 master_img.fill(BLUE)
 item_img = pygame.Surface((SCALED_GRID_SIZE, SCALED_GRID_SIZE))
 item_img.fill(GREEN)
@@ -154,8 +211,8 @@ exit_img = pygame.Surface((SCALED_GRID_SIZE, SCALED_GRID_SIZE))
 exit_img.fill(WHITE)
 
 # Tầm nhìn
-THIEF_VISION_RANGE = 1
-MASTER_VISION_RANGE = 2
+THIEF_VISION_RANGE = 2
+MASTER_VISION_RANGE = 3
 
 # Hướng mặc định của nhân vật trộm
 thief_direction = "right"
@@ -210,14 +267,21 @@ def master_vision(master_pos, thief_pos):
     zone = create_master_vision_zone(master_pos)
     return (thief_pos[0], thief_pos[1]) in zone
 
-# Thuật toán A* tìm đường
-def a_star(start, goal, grid):
+# Thuật toán A* tìm đường, có kiểm tra va chạm với đồ nội thất
+def a_star(start, goal, grid, character_size, furniture_rects):
     def heuristic(a, b):
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
     
     if start is None or goal is None:
         print("Error: Start or goal position is None!")
         return None
+    
+    # Nếu vị trí hiện tại va chạm, tìm vị trí gần nhất không va chạm
+    adjusted_start = find_nearest_free_position(start, character_size, furniture_rects, grid)
+    if adjusted_start != start:
+        print(f"Adjusted start position from {start} to {adjusted_start}")
+        start = adjusted_start
+
     pq = [(0 + heuristic(start, goal), 0, [start])]
     visited = {tuple(start): 0}
     while pq:
@@ -229,8 +293,11 @@ def a_star(start, goal, grid):
             next_x, next_y = x + dx, y + dy
             next_pos = [next_x, next_y]
             new_cost = cost + 1
+            # Kiểm tra giới hạn bản đồ, tường, và va chạm với đồ nội thất
             if (0 <= next_x < len(grid) and 0 <= next_y < len(grid[0]) and 
-                grid[next_x][next_y] != 1 and (tuple(next_pos) not in visited or new_cost < visited[tuple(next_pos)])):
+                grid[next_x][next_y] != 1 and 
+                not check_furniture_collision(next_pos, character_size, furniture_rects) and 
+                (tuple(next_pos) not in visited or new_cost < visited[tuple(next_pos)])):
                 visited[tuple(next_pos)] = new_cost
                 priority = new_cost + heuristic(next_pos, goal)
                 heapq.heappush(pq, (priority, new_cost, path + [next_pos]))
@@ -244,25 +311,34 @@ def master_patrol(master_pos, waypoints):
             if map_grid[new_waypoint[0]][new_waypoint[1]] == 0:
                 waypoints.append(new_waypoint)
                 break
-    return a_star(master_pos, waypoints[0], map_grid)
+    return a_star(master_pos, waypoints[0], map_grid, MASTER_SIZE, furniture_rects)
 
 def master_chase(master_pos, thief_pos):
-    return a_star(master_pos, thief_pos, map_grid)
+    return a_star(master_pos, thief_pos, map_grid, MASTER_SIZE, furniture_rects)
+
+def get_raw_gids_from_tmx(tmx_file_path):
+    tree = ET.parse(tmx_file_path)
+    root = tree.getroot()
+    gid_map = {}
+    for objgroup in root.findall(".//objectgroup[@name='FurnitureObjects']/object"):
+        obj_id = int(objgroup.get("id"))
+        gid = int(objgroup.get("gid", 0))
+        gid_map[obj_id] = gid
+    return gid_map
 
 # Vẽ bản đồ từ Tiled với phóng to
-def draw_map(screen, tmx_data):
+def draw_map(screen, tmx_data, tmx_file_path="map/5.tmx"):
+    # Đọc GID gốc từ file TMX
+    raw_gids = get_raw_gids_from_tmx(tmx_file_path)
+
     # Vẽ các layer tile (như sàn, tường)
     for layer in tmx_data.visible_layers:
         if isinstance(layer, pytmx.TiledTileLayer):
             for x, y, image in layer.tiles():
-                # Lấy GID của tile
                 gid = layer.data[y][x]
-                if gid == 0:  # Bỏ qua nếu không có tile
+                if gid == 0:
                     continue
-
-                # Phóng to tile
                 scaled_image = pygame.transform.scale(image, (int(SCALED_GRID_SIZE), int(SCALED_GRID_SIZE)))
-                # Vẽ tile với offset để căn giữa
                 draw_x = x * SCALED_GRID_SIZE + OFFSET_X
                 draw_y = y * SCALED_GRID_SIZE + OFFSET_Y
                 screen.blit(scaled_image, (draw_x, draw_y))
@@ -270,47 +346,80 @@ def draw_map(screen, tmx_data):
     # Vẽ các đồ nội thất từ layer "FurnitureObjects" và tô viền
     furniture_layer = tmx_data.get_layer_by_name("FurnitureObjects")
     for obj in furniture_layer:
-        if hasattr(obj, 'image') and obj.image:  # Kiểm tra xem đối tượng có hình ảnh không
-            # Lấy kích thước của đối tượng
-            tile_width = obj.width if hasattr(obj, 'width') else GRID_SIZE
-            tile_height = obj.height if hasattr(obj, 'height') else GRID_SIZE
+        if not hasattr(obj, 'image') or not obj.image:
+            continue
 
-            # Tính kích thước sau khi phóng to
-            scaled_width = tile_width * scale_factor
-            scaled_height = tile_height * scale_factor
+        # Lấy GID của đối tượng từ pytmx
+        gid = obj.gid if hasattr(obj, 'gid') else 0
+        if gid == 0:
+            continue
 
-            # Tính số ô mà tile chiếm (dựa trên kích thước gốc)
-            tile_width_in_grids = tile_width / GRID_SIZE  # Số ô theo chiều ngang
-            tile_height_in_grids = tile_height / GRID_SIZE  # Số ô theo chiều dọc
+        # Lấy GID gốc từ file TMX
+        obj_id = int(obj.id)
+        raw_gid = raw_gids.get(obj_id, gid)  # Sử dụng GID từ TMX nếu có, nếu không thì dùng GID từ pytmx
+        gid = int(raw_gid)
 
-            # Điều chỉnh vị trí vẽ để căn giữa tile trong không gian của nó
-            offset_x = (SCALED_GRID_SIZE * tile_width_in_grids - scaled_width) / 2
-            offset_y = (SCALED_GRID_SIZE * tile_height_in_grids - scaled_height) / 2
+        # Giải mã GID để lấy thông tin lật và xoay
+        FLIP_HORIZONTAL = 1 << 31  # Bit 31: Lật ngang
+        FLIP_VERTICAL = 1 << 30    # Bit 30: Lật dọc
+        FLIP_DIAGONAL = 1 << 29    # Bit 29: Xoay 90 độ (kết hợp lật)
 
-            # Phóng to hình ảnh của đối tượng
-            scaled_image = pygame.transform.scale(obj.image, (int(scaled_width), int(scaled_height)))
+        # Kiểm tra cờ lật và chuyển thành True/False
+        flip_x = bool(gid & FLIP_HORIZONTAL)
+        flip_y = bool(gid & FLIP_VERTICAL)
+        flip_diagonal = bool(gid & FLIP_DIAGONAL)
+        real_gid = gid & ~(FLIP_HORIZONTAL | FLIP_VERTICAL | FLIP_DIAGONAL)
 
-            # Xoay hình ảnh nếu đối tượng có thuộc tính rotation
-            if hasattr(obj, 'rotation') and obj.rotation != 0:
-                scaled_image = pygame.transform.rotate(scaled_image, -obj.rotation)  # Pygame xoay ngược chiều kim đồng hồ, nên dùng -rotation
+        # Lấy hình ảnh gốc và chuyển đổi định dạng
+        image = obj.image.convert_alpha()  # Đảm bảo bề mặt tương thích với Pygame
 
-            # Tính vị trí vẽ (dựa trên tọa độ pixel của đối tượng)
-            draw_x = obj.x * scale_factor + OFFSET_X + offset_x
-            draw_y = obj.y * scale_factor + OFFSET_Y + offset_y
+        # Lấy kích thước của đối tượng
+        tile_width = obj.width if hasattr(obj, 'width') else GRID_SIZE
+        tile_height = obj.height if hasattr(obj, 'height') else GRID_SIZE
 
-            # Điều chỉnh vị trí vẽ sau khi xoay (vì xoay có thể thay đổi kích thước hình ảnh)
-            if hasattr(obj, 'rotation') and obj.rotation != 0:
-                rotated_rect = scaled_image.get_rect(center=(draw_x + scaled_width / 2, draw_y + scaled_height / 2))
-                draw_x = rotated_rect.x
-                draw_y = rotated_rect.y
+        # Tính kích thước sau khi phóng to
+        scaled_width = tile_width * scale_factor
+        scaled_height = tile_height * scale_factor
 
-            # Vẽ đối tượng
-            screen.blit(scaled_image, (draw_x, draw_y))
+        # Tính số ô mà tile chiếm (dựa trên kích thước gốc)
+        tile_width_in_grids = tile_width / GRID_SIZE
+        tile_height_in_grids = tile_height / GRID_SIZE
 
-            # Tô viền cho đối tượng
-            pygame.draw.rect(screen, YELLOW, 
-                             (draw_x, draw_y, scaled_width, scaled_height), 
-                             width=3)  # Độ dày viền là 3 pixel
+        # Điều chỉnh vị trí vẽ để căn giữa tile trong không gian của nó
+        offset_x = (SCALED_GRID_SIZE * tile_width_in_grids - scaled_width) / 2
+        offset_y = (SCALED_GRID_SIZE * tile_height_in_grids - scaled_height) / 2
+
+        # Phóng to hình ảnh của đối tượng
+        scaled_image = pygame.transform.scale(image, (int(scaled_width), int(scaled_height)))
+
+        # Áp dụng lật (flip) trước khi xoay
+        if flip_x:
+            scaled_image = pygame.transform.flip(scaled_image, True, False)  # Lật ngang
+        if flip_y:
+            scaled_image = pygame.transform.flip(scaled_image, False, True)  # Lật dọc
+
+        # Xoay hình ảnh nếu đối tượng có thuộc tính rotation
+        rotation = getattr(obj, 'rotation', 0)
+        if rotation != 0:
+            scaled_image = pygame.transform.rotate(scaled_image, -rotation)  # Pygame xoay ngược chiều kim đồng hồ
+
+        # Tính vị trí vẽ
+        draw_x = obj.x * scale_factor + OFFSET_X + offset_x
+        draw_y = obj.y * scale_factor + OFFSET_Y + offset_y
+
+        # Điều chỉnh vị trí vẽ sau khi xoay
+        if rotation != 0:
+            rotated_rect = scaled_image.get_rect(center=(draw_x + scaled_width / 2, draw_y + scaled_height / 2))
+            draw_x = rotated_rect.x
+            draw_y = rotated_rect.y
+
+        # Vẽ đối tượng
+        screen.blit(scaled_image, (draw_x, draw_y))
+
+        # # Tô viền cho đối tượng
+        # pygame.draw.rect(screen, YELLOW, 
+        #                  (draw_x, draw_y, scaled_width, scaled_height), 
+        #                  width=3)
 
 # Vòng lặp chính
 clock = pygame.time.Clock()
@@ -331,33 +440,38 @@ while not game_over:
 
     # Tìm mục tiêu cho nhân vật trộm
     if collected_items < len(items):
-        path = a_star(thief_pos, items[collected_items], map_grid)
+        path = a_star(thief_pos, items[collected_items], map_grid, THIEF_SIZE, furniture_rects)
     else:
-        path = a_star(thief_pos, exit_pos, map_grid)
+        path = a_star(thief_pos, exit_pos, map_grid, THIEF_SIZE, furniture_rects)
 
     # Di chuyển nhân vật trộm và cập nhật hướng
     if path and len(path) > 1:
         next_pos = path[1]
-        dx = next_pos[0] - thief_pos[0]
-        dy = next_pos[1] - thief_pos[1]
-        if dx == -1:
-            thief_direction = "up"
-        elif dx == 1:
-            thief_direction = "down"
-        elif dy == -1:
-            thief_direction = "left"
-        elif dy == 1:
-            thief_direction = "right"
-        
-        thief_pos = next_pos
-        path.pop(0)
+        # Kiểm tra va chạm với đồ nội thất trước khi di chuyển (để chắc chắn)
+        if not check_furniture_collision(next_pos, THIEF_SIZE, furniture_rects):
+            dx = next_pos[0] - thief_pos[0]
+            dy = next_pos[1] - thief_pos[1]
+            if dx == -1:
+                thief_direction = "up"
+            elif dx == 1:
+                thief_direction = "down"
+            elif dy == -1:
+                thief_direction = "left"
+            elif dy == 1:
+                thief_direction = "right"
+            
+            thief_pos = next_pos
+            path.pop(0)
 
-        if thief_pos in items:
-            items.remove(thief_pos)
-            collected_items += 1
-        if thief_pos == exit_pos and collected_items == len(items):
-            print("Tên trộm đã thoát!")
-            game_over = True
+            if thief_pos in items:
+                items.remove(thief_pos)
+                collected_items += 1
+            if thief_pos == exit_pos and collected_items == len(items):
+                print("Tên trộm đã thoát!")
+                game_over = True
+        else:
+            # Nếu có va chạm, tìm đường mới
+            path = None
 
     # Di chuyển ông chủ
     if master_vision(master_pos, thief_pos):
@@ -369,8 +483,14 @@ while not game_over:
             master_waypoints.pop(0)
 
     if master_path and len(master_path) > 1:
-        master_pos = master_path[1]
-        master_path.pop(0)
+        next_pos = master_path[1]
+        # Kiểm tra va chạm với đồ nội thất trước khi di chuyển (để chắc chắn)
+        if not check_furniture_collision(next_pos, MASTER_SIZE, furniture_rects):
+            master_pos = next_pos
+            master_path.pop(0)
+        else:
+            # Nếu có va chạm, tìm đường mới
+            master_path = None
 
     if master_pos == thief_pos:
         print("Bị ông chủ bắt!")
@@ -389,6 +509,17 @@ while not game_over:
     master_vision_zone = create_master_vision_zone(master_pos)
     for i, j in master_vision_zone:
         pygame.draw.rect(screen, LIGHT_PURPLE, (j * SCALED_GRID_SIZE + OFFSET_X, i * SCALED_GRID_SIZE + OFFSET_Y, SCALED_GRID_SIZE, SCALED_GRID_SIZE), width=2)
+
+    # Tính và in hitbox của nhân vật
+    thief_hitbox = get_character_hitbox(thief_pos, THIEF_SIZE)
+    master_hitbox = get_character_hitbox(master_pos, MASTER_SIZE)
+    
+    print(f"Thief hitbox: x={thief_hitbox.x}, y={thief_hitbox.y}, width={thief_hitbox.width}, height={thief_hitbox.height}")
+    print(f"Master hitbox: x={master_hitbox.x}, y={master_hitbox.y}, width={master_hitbox.width}, height={master_hitbox.height}")
+
+    # Vẽ hitbox lên màn hình
+    # pygame.draw.rect(screen, GREEN, thief_hitbox, width=2)  # Hitbox của thief (màu xanh lá)
+    # pygame.draw.rect(screen, BLUE, master_hitbox, width=2)  # Hitbox của master (màu xanh dương)
 
     # Vẽ nhân vật trộm với sprite tương ứng với hướng
     thief_img = thief_sprites[thief_direction][current_frame]  # Chọn sprite theo hướng
